@@ -1,9 +1,8 @@
-# graph.py
 import csv
 import math
-import matplotlib.pyplot as plt
 import json
 import os
+import plotly.graph_objects as go
 
 # ---------------------------------------
 # Haversine para distancias aproximadas
@@ -14,6 +13,7 @@ def haversine(lat1, lon1, lat2, lon2):
     phi2 = math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
+
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*(math.sin(dlambda/2)**2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c  # metros
@@ -46,7 +46,7 @@ class Graph:
                 self.aristas.setdefault(nombre, {})
 
     # ---------------------------------------------------------
-    # Cargar rutas desde CSV (con secuencia)
+    # Cargar rutas desde CSV
     # ---------------------------------------------------------
     def cargar_rutas(self, archivo):
         rutas_por_nombre = {}
@@ -56,11 +56,8 @@ class Graph:
                 ruta = row["Nombre ruta"].strip()
                 parada = row["Nombre parada"].strip()
                 seq = int(row["Secuencia parada"])
-                if ruta not in rutas_por_nombre:
-                    rutas_por_nombre[ruta] = []
-                rutas_por_nombre[ruta].append((seq, parada))
+                rutas_por_nombre.setdefault(ruta, []).append((seq, parada))
 
-        # Ordenar por secuencia y agregar aristas consecutivas
         for ruta, lista in rutas_por_nombre.items():
             lista.sort()
             for i in range(len(lista)-1):
@@ -70,7 +67,7 @@ class Graph:
                     self.agregar_arista(a, b)
 
     # ---------------------------------------------------------
-    # Agregar arista
+    # Agregar arista con Haversine como base
     # ---------------------------------------------------------
     def agregar_arista(self, a, b):
         lat1, lon1 = self.coords[a]
@@ -81,43 +78,47 @@ class Graph:
         self.aristas[b][a] = {"dist": dist, "time": None}
 
     # ---------------------------------------------------------
-    # Cargar distancias reales desde JSON cache
+    # Cargar distancias y tiempos reales desde JSON
     # ---------------------------------------------------------
     def cargar_cache_aristas(self, archivo_json):
-        """Carga distancias y tiempos de un JSON de coordenadas en el grafo."""
         if not os.path.exists(archivo_json):
-            print("⚠️ JSON de cache no encontrado:", archivo_json)
+            print("⚠️ JSON no encontrado:", archivo_json)
             return
 
         with open(archivo_json, "r", encoding="utf-8") as f:
             cache = json.load(f)
 
+        # Recorremos todas las aristas y buscamos coincidencia exacta en JSON
         for a in self.aristas:
             for b in self.aristas[a]:
                 lat1, lon1 = self.coords[a]
                 lat2, lon2 = self.coords[b]
 
+                # Claves posibles
                 k1 = f"{lat1},{lon1}|{lat2},{lon2}"
                 k2 = f"{lat2},{lon2}|{lat1},{lon1}"
 
+                datos = None
                 if k1 in cache:
                     datos = cache[k1]
                 elif k2 in cache:
                     datos = cache[k2]
-                else:
-                    continue
 
-                self.aristas[a][b]["dist"] = datos.get("dist", self.aristas[a][b]["dist"])
-                self.aristas[a][b]["time"] = datos.get("time_min", self.aristas[a][b]["time"])
+                if datos:
+                    # Actualizamos dist y tiempo desde JSON
+                    self.aristas[a][b]["dist"] = datos.get("dist", self.aristas[a][b]["dist"])
+                    t = datos.get("time_min")
+                    # Solo asignamos si no es None y > 0
+                    if t is not None and t > 0:
+                        self.aristas[a][b]["time"] = t
 
-        print("✔ Cache de distancias y tiempos cargada.")
+        print("✔ Cache de distancias y tiempos cargada correctamente.")
 
     # ---------------------------------------------------------
-    # Dijkstra para ruta más corta
+    # Dijkstra para ruta más corta (por distancia)
     # ---------------------------------------------------------
     def ruta_mas_corta(self, origen, destino):
         import heapq
-
         dist = {n: float("inf") for n in self.aristas}
         dist[origen] = 0
         prev = {n: None for n in self.aristas}
@@ -129,6 +130,7 @@ class Graph:
                 break
             if d != dist[u]:
                 continue
+
             for v, datos in self.aristas[u].items():
                 w = datos["dist"]
                 if dist[u] + w < dist[v]:
@@ -139,6 +141,7 @@ class Graph:
         if dist[destino] == float("inf"):
             return None, None
 
+        # Reconstruir ruta
         camino = []
         x = destino
         while x:
@@ -148,48 +151,65 @@ class Graph:
         return camino, dist[destino]
 
     # ---------------------------------------------------------
-    # Dibujar grafo completo
+    # Dibujar grafo con ruta destacada y hover completo
     # ---------------------------------------------------------
     def dibujar_grafo(self, ruta_destacada=None):
-        plt.figure(figsize=(14, 12))
         pos = self.coords
-        dibujadas = set()
+        fig = go.Figure()
+        usadas = set()
 
-        # Dibujar aristas
+        def es_par_ruta(a, b, ruta):
+            if not ruta:
+                return False
+            for i in range(len(ruta)-1):
+                if (ruta[i] == a and ruta[i+1] == b) or (ruta[i] == b and ruta[i+1] == a):
+                    return True
+            return False
+
+        # Aristas
         for a in self.aristas:
             for b, datos in self.aristas[a].items():
-                if (b, a) in dibujadas:
+                if (b, a) in usadas:
                     continue
-                dibujadas.add((a, b))
+                usadas.add((a, b))
 
-                lat1, lon1 = pos[a]
-                lat2, lon2 = pos[b]
+                x0, y0 = pos[a][1], pos[a][0]
+                x1, y1 = pos[b][1], pos[b][0]
 
-                # si está en ruta destacada
-                if ruta_destacada and a in ruta_destacada and b in ruta_destacada:
-                    lw = 2.5
-                    color = "orange"
-                else:
-                    lw = 1
-                    color = "blue"
+                t = datos.get("time")
+                txt = f"<b>{a} → {b}</b><br>Distancia: {datos['dist']:.3f} km"
+                txt += f"<br>Tiempo: {t:.2f} min" if t else "<br>Tiempo: N/A"
 
-                plt.plot([lon1, lon2], [lat1, lat2], color=color, linewidth=lw)
+                color = "red" if es_par_ruta(a, b, ruta_destacada) else "blue"
+                width = 5 if color == "red" else 1.5
 
-                # Etiqueta con distancia y tiempo
-                if datos.get("dist"):
-                    xm, ym = (lon1 + lon2)/2, (lat1 + lat2)/2
-                    etiqueta = f"{datos['dist']:.2f} km"
-                    if datos.get("time"):
-                        etiqueta += f" / {datos['time']:.1f} min"
-                    plt.text(xm, ym, etiqueta, fontsize=6, color="red")
+                fig.add_trace(go.Scatter(
+                    x=[x0, x1],
+                    y=[y0, y1],
+                    mode="lines",
+                    line=dict(color=color, width=width),
+                    hoverinfo="text",
+                    text=[txt],
+                    showlegend=False
+                ))
 
-        # Dibujar nodos
-        for n, (lat, lon) in pos.items():
-            plt.scatter(lon, lat, s=20, color="black", zorder=3)
-            plt.text(lon, lat, n, fontsize=6, zorder=4)
+        # Nodos
+        fig.add_trace(go.Scatter(
+            x=[pos[n][1] for n in pos],
+            y=[pos[n][0] for n in pos],
+            mode="markers",
+            marker=dict(size=10, color="black"),
+            text=list(pos.keys()),
+            hoverinfo="text",
+            name="Estaciones"
+        ))
 
-        plt.title("Mapa completo del sistema Transmetro")
-        plt.xlabel("Longitud")
-        plt.ylabel("Latitud")
-        plt.tight_layout()
-        plt.show()
+        fig.update_layout(
+            title="Mapa interactivo del sistema Transmetro",
+            showlegend=False,
+            hovermode="closest",
+            width=1200,
+            height=900
+        )
+
+        fig.show()
